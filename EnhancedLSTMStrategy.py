@@ -9,8 +9,6 @@ from technical import qtpylib
 
 from freqtrade.exchange.exchange_utils import *
 from freqtrade.strategy import IStrategy, RealParameter, IntParameter
-from freqtrade.persistence import Trade
-from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +68,11 @@ class EnhancedLSTMStrategy(IStrategy):
     # Stoploss - 固定止损，不做动态调整
     stoploss = -1.0  # 100% 止损，让模型完全决定何时退出  
 
-    # Trailing stop - 使用自适应custom_stoploss替代硬编码参数
+    # Trailing stop - 更灵活适应大资金和高杠杆
     trailing_stop = True
-    trailing_stop_positive = 0.001           # 最小值，实际由custom_stoploss决定
-    trailing_stop_positive_offset = 0.001    # 最小值，实际由custom_stoploss决定
-    trailing_only_offset_is_reached = False  # 允许立即启动自适应止损
+    trailing_stop_positive = 0.005           # 0.5% - 更紧密的跟踪
+    trailing_stop_positive_offset = 0.015    # 1.5% - 更早触发
+    trailing_only_offset_is_reached = True
 
     timeframe = "1h"
     can_short = True
@@ -450,125 +448,6 @@ class EnhancedLSTMStrategy(IStrategy):
                 return min(fallback_stake, max_stake) if max_stake else fallback_stake
             except:
                 return proposed_stake
-
-    def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime,
-                        current_rate: float, current_profit: float, after_fill: bool,
-                        **kwargs) -> float | None:
-        """
-        自适应止损系统 - 完全基于市场条件动态调整
-        不依赖任何硬性参数，考虑：
-        1. LSTM模型预测信心度
-        2. 当前杠杆倍数
-        3. 市场波动性（ATR）
-        4. 持仓时间
-        5. 盈利水平
-        6. 手续费补偿
-        """
-        try:
-            # 获取最新数据
-            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-            
-            if len(dataframe) < 20:
-                # 数据不足时使用保守止损
-                return -0.05  # 5%止损
-            
-            # 获取关键指标
-            current_index = len(dataframe) - 1
-            lstm_prediction = dataframe['&-target'].iloc[current_index]
-            confidence = dataframe['confidence_smooth'].iloc[current_index] if 'confidence_smooth' in dataframe.columns else 0.5
-            atr_normalized = dataframe['atr_normalized'].iloc[current_index] if 'atr_normalized' in dataframe.columns else 0.02
-            current_leverage = trade.leverage or 1.0
-            
-            # 计算持仓时间（小时）
-            trade_duration_hours = (current_time - trade.open_date_utc).total_seconds() / 3600
-            
-            # 1. 基础止损 - 基于杠杆和波动性
-            # 高杠杆需要更紧的止损
-            leverage_factor = 1.0 / (1.0 + current_leverage / 20.0)  # 杠杆越高，系数越小
-            
-            # 波动性调整 - 波动越大，止损越宽
-            volatility_factor = 1.0 + min(atr_normalized * 10, 0.5)  # 最多放宽50%
-            
-            # 基础止损范围：1%-10%，根据杠杆和波动性调整
-            base_stoploss = -0.01 * (1 + 9 * leverage_factor) * volatility_factor
-            
-            # 2. 手续费补偿
-            # 确保止损距离至少覆盖往返手续费（约0.1% * 2 * 杠杆）
-            min_fee_distance = -0.002 * current_leverage
-            base_stoploss = min(base_stoploss, min_fee_distance * 1.5)  # 1.5倍手续费作为最小距离
-            
-            # 3. LSTM信心度调整
-            # 根据模型预测方向和信心度调整止损
-            if trade.is_short:
-                # 空单：LSTM预测越负（看空越强），止损可以更宽
-                direction_alignment = -lstm_prediction  # 负值变正值
-            else:
-                # 多单：LSTM预测越正（看多越强），止损可以更宽
-                direction_alignment = lstm_prediction
-            
-            # 信心度和方向一致性综合因子
-            confidence_factor = confidence * max(0, min(1, direction_alignment))
-            
-            # 根据信心度调整止损（信心越高，止损可以适当放宽）
-            if confidence_factor > 0.7:
-                stoploss = base_stoploss * (1 + 0.3 * confidence_factor)  # 最多放宽30%
-            elif confidence_factor < 0.3:
-                stoploss = base_stoploss * 0.7  # 信心低时收紧30%
-            else:
-                stoploss = base_stoploss
-            
-            # 4. 盈利阶梯保护
-            if current_profit > 0:
-                # 盈利时实施更积极的止损保护
-                if current_profit > 0.10:  # 盈利超过10%
-                    # 保护80%的利润
-                    stoploss = max(stoploss, -(1 - current_profit * 0.8))
-                elif current_profit > 0.05:  # 盈利5-10%
-                    # 保护60%的利润
-                    stoploss = max(stoploss, -(1 - current_profit * 0.6))
-                elif current_profit > 0.02:  # 盈利2-5%
-                    # 保护40%的利润，但至少保本（考虑手续费）
-                    stoploss = max(stoploss, -(1 - current_profit * 0.4))
-                    stoploss = max(stoploss, -0.002 * current_leverage)  # 至少覆盖手续费
-                elif current_profit > 0.002 * current_leverage:  # 盈利刚覆盖手续费
-                    # 尽量保本
-                    stoploss = max(stoploss, -0.001 * current_leverage)
-            
-            # 5. 时间衰减 - 持仓时间越长，止损逐渐收紧
-            if trade_duration_hours > 24:  # 超过24小时
-                time_factor = min(0.5, trade_duration_hours / 168)  # 最多收紧50%（一周）
-                stoploss = stoploss * (1 - time_factor)
-            elif trade_duration_hours > 6:  # 6-24小时
-                time_factor = min(0.2, trade_duration_hours / 48)  # 最多收紧20%
-                stoploss = stoploss * (1 - time_factor)
-            
-            # 6. 市场结构检测 - 如果检测到强烈反转信号，收紧止损
-            trend_reversal_score = dataframe['trend_reversal_score'].iloc[current_index] if 'trend_reversal_score' in dataframe.columns else 0
-            if trend_reversal_score > 0.5:
-                stoploss = stoploss * 0.7  # 收紧30%
-            
-            # 7. 确保止损在合理范围内
-            # 最大止损不超过20%（即使100倍杠杆）
-            # 最小止损不小于0.1%（避免过于敏感）
-            stoploss = max(stoploss, -0.20)
-            stoploss = min(stoploss, -0.001)
-            
-            # 详细日志
-            if current_time.minute % 5 == 0:  # 每5分钟记录一次
-                logger.info(f"自适应止损 {pair}: {stoploss:.4f} | "
-                           f"盈亏: {current_profit:.2%} | "
-                           f"杠杆: {current_leverage}x | "
-                           f"LSTM: {lstm_prediction:.3f} | "
-                           f"信心度: {confidence:.3f} | "
-                           f"波动率: {atr_normalized:.4f} | "
-                           f"持仓: {trade_duration_hours:.1f}h")
-            
-            return stoploss
-            
-        except Exception as e:
-            logger.error(f"自适应止损计算错误 {pair}: {e}")
-            # 出错时返回保守止损
-            return -0.05
 
     def leverage(self, pair: str, current_time, current_rate: float,
                 proposed_leverage: float, max_leverage: float, entry_tag: Optional[str],
