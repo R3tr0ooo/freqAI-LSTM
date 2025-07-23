@@ -290,3 +290,19 @@ Contributions to the project are welcome! If you find any issues or have suggest
 issue or submit a pull request on the [GitHub repository](https://github.com/netanelshoshan/freqAI-LSTM).
 
 
+enhance由Claude4.0 opus改进
+支持自适应杠杆倍数和资金使用比例
+
+目前的问题在跟踪止损, 由于杠杆倍数大, 需要更多的利润覆盖手续费, 你可以自己限制杠杆倍数的范围或者跟踪止损的参数, 以下是一个例子
+```
+# 100倍杠杆的追踪止损设置
+  trailing_stop = True
+  trailing_stop_positive = 0.01           # 1% - 对应100%仓位波动
+  trailing_stop_positive_offset = 0.02    # 2% - 对应200%仓位波动后才激活
+  trailing_only_offset_is_reached = True
+
+  更激进的设置（追求更大利润）：
+  trailing_stop_positive = 0.015          # 1.5% - 给更多上涨空间
+  trailing_stop_positive_offset = 0.03    # 3% - 确保有足够利润覆盖手续费
+```
+
