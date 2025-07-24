@@ -9,6 +9,8 @@ from technical import qtpylib
 
 from freqtrade.exchange.exchange_utils import *
 from freqtrade.strategy import IStrategy, RealParameter, IntParameter
+from freqtrade.persistence import Trade
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ class EnhancedLSTMStrategy(IStrategy):
         "w8": 0.85667,
         "leverage_multiplier": 1.0,        # 基础杠杆倍数，改为1.0支持更宽范围
         "min_leverage": 1,                 # 最小杠杆改为1倍
-        "max_leverage": 30,
+        "max_leverage": 100,
         "volatility_threshold": 0.02,
         "confidence_threshold": 0.7,
         "trend_persistence_bars": 3,
@@ -66,12 +68,12 @@ class EnhancedLSTMStrategy(IStrategy):
     }
 
     # Stoploss - 固定止损，不做动态调整
-    stoploss = -1.0  # 100% 止损，让模型完全决定何时退出  
+    stoploss = -10000  # 无止损，让模型完全决定何时退出  
 
-    # Trailing stop - 更灵活适应大资金和高杠杆
+    # Trailing stop - 使用ExampleLSTMStrategy的配置
     trailing_stop = True
-    trailing_stop_positive = 0.005           # 0.5% - 更紧密的跟踪
-    trailing_stop_positive_offset = 0.015    # 1.5% - 更早触发
+    trailing_stop_positive = 0.001
+    trailing_stop_positive_offset = 0.0139
     trailing_only_offset_is_reached = True
 
     timeframe = "1h"
@@ -90,11 +92,6 @@ class EnhancedLSTMStrategy(IStrategy):
     # Enhanced strategy parameters
     threshold_buy = RealParameter(-1, 1, default=0.5, space='buy')
     threshold_sell = RealParameter(-1, 1, default=-0.5, space='sell')
-    
-    # Adaptive switches
-    adaptive_leverage_enabled = True      # 自适应杠杆开关
-    adaptive_position_enabled = True      # 自适应仓位开关
-    global_leverage = 10                  # 全局固定杠杆倍数（当adaptive_leverage_enabled=False时使用）
     
     # Leverage parameters (支持1-100倍完整范围)
     leverage_multiplier = RealParameter(0.5, 2.0, default=1.0, space='buy')
@@ -133,55 +130,28 @@ class EnhancedLSTMStrategy(IStrategy):
     def calculate_adaptive_leverage(self, dataframe: DataFrame, current_index: int) -> float:
         """
         LSTM模型完全决定杠杆 - 无风险管理限制
-        直接基于模型输出计算杠杆
+        直接基于模型输出计算1-100倍杠杆
         """
-        # 如果关闭自适应杠杆，返回全局固定杠杆
-        if not self.adaptive_leverage_enabled:
-            return self.global_leverage
-            
         try:
             if current_index < 20:  # Not enough data
-                logger.info("Not enough data for adaptive leverage, using default 10x")
-                return 10  # 默认10倍
+                return 50  # 默认50倍
                 
-            # 获取目标值和置信度
-            target_val = abs(dataframe['&-target'].iloc[current_index]) if '&-target' in dataframe.columns else 0
+            # 直接使用LSTM模型输出
+            target_strength = abs(dataframe['&-target'].iloc[current_index])
             confidence = dataframe['confidence_smooth'].iloc[current_index] if 'confidence_smooth' in dataframe.columns else 0.5
             
-            # 如果目标值或置信度太低，使用默认杠杆
-            if target_val < 0.01 or confidence < 0.01:
-                logger.debug(f"Low target/confidence: target={target_val:.4f}, confidence={confidence:.4f}, using default 10x leverage")
-                return 10
+            # 简单线性映射：模型输出越强，杠杆越高
+            # target_strength 范围通常在 0-1，直接映射到 1-100
+            leverage = target_strength * 100 * self.leverage_multiplier.value
             
-            # 使用归一化的LSTM模型输出
-            if '&-target_normalized' in dataframe.columns:
-                target_strength = abs(dataframe['&-target_normalized'].iloc[current_index])
-            else:
-                # Fallback: 尝试归一化原始值
-                target_95th = dataframe['&-target'].abs().quantile(0.95)
-                if target_95th > 0:
-                    target_strength = min(1.0, target_val / target_95th)
-                else:
-                    target_strength = 0.5
-            
-            # 结合目标强度和置信度计算杠杆
-            # 使用更保守的方法：两者相乘
-            combined_factor = target_strength * confidence
-            
-            # 映射到杠杆范围
-            leverage_range = self.max_leverage.value - self.min_leverage.value
-            leverage = self.min_leverage.value + (combined_factor * leverage_range * self.leverage_multiplier.value)
-            
-            # 确保在min_leverage-max_leverage范围内
-            leverage = max(self.min_leverage.value, min(self.max_leverage.value, leverage))
-            
-            logger.debug(f"Adaptive leverage calc: target_strength={target_strength:.4f}, confidence={confidence:.4f}, leverage={leverage:.1f}x")
+            # 确保在1-100范围内
+            leverage = max(1, min(100, leverage))
             
             return int(leverage)
             
         except Exception as e:
-            logger.warning(f"Error calculating adaptive leverage: {e}, using fallback 10x")
-            return 10  # 错误时默认10倍
+            logger.warning(f"Error calculating adaptive leverage: {e}")
+            return 50  # 错误时默认50倍
 
     def calculate_position_size(self, dataframe: DataFrame, current_index: int, 
                               stake_amount: float, current_rate: float) -> float:
@@ -368,16 +338,6 @@ class EnhancedLSTMStrategy(IStrategy):
         dataframe['confidence'] = abs(dataframe['T']).rolling(8).mean()
         dataframe['confidence_smooth'] = dataframe['confidence'].rolling(3).mean()
         
-        # Normalize &-target values for leverage and position calculations
-        # Use percentile-based normalization to handle outliers
-        if '&-target' in dataframe.columns:
-            target_95th = dataframe['&-target'].abs().quantile(0.95)
-            if target_95th > 0:
-                dataframe['&-target_normalized'] = dataframe['&-target'] / target_95th
-                dataframe['&-target_normalized'] = dataframe['&-target_normalized'].clip(-1, 1)
-            else:
-                dataframe['&-target_normalized'] = 0
-        
         # Add trend reversal detection
         dataframe['trend_reversal_score'] = (
             abs(dataframe['T'].diff()) * 
@@ -415,56 +375,26 @@ class EnhancedLSTMStrategy(IStrategy):
         LSTM模型完全决定仓位 - 无风险管理限制
         直接基于模型输出计算1%-100%资金使用
         """
-        # 如果关闭自适应仓位，返回None（将在custom_stake_amount中处理）
-        if not self.adaptive_position_enabled:
-            return None
-            
         try:
             if current_index < 20:
-                logger.debug("Not enough data for adaptive stake, returning None for config fallback")
-                return None  # 让custom_stake_amount使用config设置
+                return 0.5  # 默认50%
                 
-            # 获取目标值和置信度
-            target_val = abs(dataframe['&-target'].iloc[current_index]) if '&-target' in dataframe.columns else 0
+            # 直接使用LSTM模型输出
+            target_strength = abs(dataframe['&-target'].iloc[current_index])
             confidence = dataframe['confidence_smooth'].iloc[current_index] if 'confidence_smooth' in dataframe.columns else 0.5
             
-            # 如果目标值或置信度太低，使用config设置
-            if target_val < 0.01 or confidence < 0.01:
-                logger.debug(f"Low target/confidence for stake: target={target_val:.4f}, confidence={confidence:.4f}, using config settings")
-                return None  # 让custom_stake_amount使用config设置
-            
-            # 使用归一化的LSTM模型输出
-            if '&-target_normalized' in dataframe.columns:
-                target_strength = abs(dataframe['&-target_normalized'].iloc[current_index])
-            else:
-                # Fallback: 尝试归一化原始值
-                target_95th = dataframe['&-target'].abs().quantile(0.95)
-                if target_95th > 0:
-                    target_strength = min(1.0, target_val / target_95th)
-                else:
-                    logger.debug("Cannot normalize target value, using config settings")
-                    return None
-            
-            # 结合目标强度和置信度计算仓位比例
-            # 使用更保守的方法：两者相乘再乘以倍数因子
+            # 简单线性映射：模型输出越强，仓位越大
+            # 结合信心度和目标强度
             stake_ratio = target_strength * confidence * self.stake_multiplier.value
             
-            # 应用波动率调整（可选）
-            if '%-volatility' in dataframe.columns:
-                volatility = dataframe['%-volatility'].iloc[current_index]
-                if volatility > self.volatility_threshold.value:
-                    stake_ratio *= (1.0 / self.volatility_stake_factor.value)
-            
-            # 确保在min_stake_ratio到max_stake_ratio范围内
-            stake_ratio = max(self.min_stake_ratio.value, min(self.max_stake_ratio.value, stake_ratio))
-            
-            logger.debug(f"Adaptive stake calc: target_strength={target_strength:.4f}, confidence={confidence:.4f}, stake_ratio={stake_ratio:.2%}")
+            # 确保在1%-100%范围内
+            stake_ratio = max(0.01, min(1.0, stake_ratio))
             
             return stake_ratio
             
         except Exception as e:
-            logger.warning(f"Error calculating adaptive stake ratio: {e}, using config settings")
-            return None  # 错误时使用config设置
+            logger.warning(f"Error calculating adaptive stake ratio: {e}")
+            return 0.5  # 错误时默认50%
             
     def custom_stake_amount(self, pair: str, current_time, current_rate: float,
                           proposed_stake: float, min_stake: Optional[float], max_stake: float,
@@ -474,29 +404,18 @@ class EnhancedLSTMStrategy(IStrategy):
         Fully adaptive stake amount calculation - 1% to 100%!
         Calculates stake ratio based on market conditions just like leverage
         """
-        # 如果关闭自适应仓位，使用config中的固定仓位大小
-        if not self.adaptive_position_enabled:
-            # 返回proposed_stake，这是来自config.json中stake_amount的值
-            logger.info(f"Using fixed stake amount for {pair}: {proposed_stake:.2f} USDT")
-            return proposed_stake
-            
         try:
             # Get the latest dataframe
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
             
             if len(dataframe) < 20:
-                # Not enough data, use config settings
-                logger.info(f"Not enough data for adaptive stake, using proposed stake: {proposed_stake:.2f} USDT")
-                return proposed_stake
+                # Not enough data, use minimal stake
+                available_balance = self.wallets.get_free(self.config['stake_currency'])
+                return max(available_balance * self.min_stake_ratio.value, min_stake or 0)
             
             # Calculate adaptive stake ratio (just like adaptive leverage)
             current_index = len(dataframe) - 1
             stake_ratio = self.calculate_adaptive_stake_ratio(dataframe, current_index)
-            
-            # 如果stake_ratio返回None，使用config设置
-            if stake_ratio is None:
-                logger.info(f"Adaptive stake ratio is None, using proposed stake: {proposed_stake:.2f} USDT")
-                return proposed_stake
             
             # Get available balance
             available_balance = self.wallets.get_free(self.config['stake_currency'])
@@ -511,9 +430,9 @@ class EnhancedLSTMStrategy(IStrategy):
                 calculated_stake = min(calculated_stake, max_stake)
             
             # Get market info for logging
-            target_strength = abs(dataframe['&-target'].iloc[-1]) if '&-target' in dataframe.columns else 0
+            target_strength = abs(dataframe['&-target'].iloc[-1])
             confidence = dataframe['confidence_smooth'].iloc[-1] if 'confidence_smooth' in dataframe.columns else 0.5
-            calculated_leverage = dataframe['calculated_leverage'].iloc[-1] if 'calculated_leverage' in dataframe.columns else 10
+            calculated_leverage = dataframe['calculated_leverage'].iloc[-1] if 'calculated_leverage' in dataframe.columns else 1
             
             logger.info(f"Adaptive stake for {pair}: {calculated_stake:.2f} USDT "
                        f"({stake_ratio:.1%} of {available_balance:.2f} USDT) - "
@@ -523,9 +442,15 @@ class EnhancedLSTMStrategy(IStrategy):
             return calculated_stake
             
         except Exception as e:
-            logger.warning(f"Error in adaptive stake calculation: {e}, using proposed stake")
-            # Fallback to config settings
-            return proposed_stake
+            logger.warning(f"Error in adaptive stake calculation: {e}")
+            # Fallback to minimal risk
+            try:
+                available_balance = self.wallets.get_free(self.config['stake_currency'])
+                fallback_stake = max(available_balance * self.min_stake_ratio.value, min_stake or 0)
+                return min(fallback_stake, max_stake) if max_stake else fallback_stake
+            except:
+                return proposed_stake
+
 
     def leverage(self, pair: str, current_time, current_rate: float,
                 proposed_leverage: float, max_leverage: float, entry_tag: Optional[str],
@@ -539,27 +464,22 @@ class EnhancedLSTMStrategy(IStrategy):
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
             
             if len(dataframe) < 20:
-                logger.info(f"Not enough data for leverage calculation, using default 10x for {pair}")
-                return min(10, max_leverage)
+                return min(self.min_leverage.value, max_leverage)
                 
             # Get calculated leverage
-            calculated_leverage = dataframe['calculated_leverage'].iloc[-1] if 'calculated_leverage' in dataframe.columns else 10
+            calculated_leverage = dataframe['calculated_leverage'].iloc[-1]
             
             # Ensure it's within bounds
             final_leverage = min(calculated_leverage, max_leverage, self.max_leverage.value)
             final_leverage = max(final_leverage, 1)
             
-            # 获取额外信息用于日志
-            target_val = abs(dataframe['&-target'].iloc[-1]) if '&-target' in dataframe.columns else 0
-            confidence = dataframe['confidence_smooth'].iloc[-1] if 'confidence_smooth' in dataframe.columns else 0
-            
-            logger.info(f"LSTM leverage for {pair}: {final_leverage}x (target={target_val:.3f}, confidence={confidence:.3f})")
+            logger.info(f"LSTM leverage for {pair}: {final_leverage}x")
             
             return final_leverage
             
         except Exception as e:
-            logger.warning(f"Error calculating leverage: {e}, using default 10x")
-            return min(10, max_leverage)
+            logger.warning(f"Error calculating leverage: {e}")
+            return min(self.min_leverage.value, max_leverage)
 
     def populate_entry_trend(self, df: DataFrame, metadata: dict) -> DataFrame:
         # Enhanced entry conditions with stronger confirmation
