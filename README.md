@@ -305,4 +305,4 @@ enhance由Claude4.0 opus改进
   trailing_stop_positive = 0.015          # 1.5% - 给更多上涨空间
   trailing_stop_positive_offset = 0.03    # 3% - 确保有足够利润覆盖手续费
 ```
-
+Update:现在跟踪止损由杠杆进行同比例放大, 不需要专门调整了
