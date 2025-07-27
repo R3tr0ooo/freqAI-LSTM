@@ -46,7 +46,7 @@ class EnhancedLSTMStrategy(IStrategy):
         "stake_multiplier": 0.8,           # 基础资金倍数，提高到0.8
         "confidence_stake_factor": 2.0,    # 信心度资金因子，提高到2.0
         "volatility_stake_factor": 1.5,    # 波动率资金因子，提高到1.5
-        "max_stake_ratio": 1.0,            # 最大资金使用比例100%
+        "max_stake_ratio": 0.3,            # 最大资金使用比例30%
         "min_stake_ratio": 0.01,           # 最小资金使用比例1%
     }
 
@@ -59,22 +59,22 @@ class EnhancedLSTMStrategy(IStrategy):
 
     # ROI table - 适应高杠杆和大资金使用
     minimal_roi = {
-        "0": 0.20,    # 20% at start - 高杠杆下更快获利
-        "180": 0.10,  # 10% after 3 hours
-        "360": 0.06,  # 6% after 6 hours
-        "720": 0.03,  # 3% after 12 hours
-        "1440": 0.01, # 1% after 24 hours
-        "2880": 0     # Hold after 48 hours
+        "600": 0
     }
 
     # Stoploss - 固定止损，不做动态调整
     stoploss = -10000  # 无止损，让模型完全决定何时退出  
 
-    # Trailing stop - 使用ExampleLSTMStrategy的配置
-    trailing_stop = True
-    trailing_stop_positive = 0.001
-    trailing_stop_positive_offset = 0.0139
-    trailing_only_offset_is_reached = True
+    # 跟踪止损 - 禁用固定跟踪止损，仅使用基于杠杆的自适应跟踪止损
+    trailing_stop = False  # 禁用固定跟踪止损
+    # trailing_stop_positive = 0.001  # 已禁用
+    # trailing_stop_positive_offset = 0.0139  # 已禁用
+    # trailing_only_offset_is_reached = False  # 已禁用
+    use_custom_stoploss = True  # 启用自定义止损（基于杠杆）
+    
+    # 基础跟踪止损参数（将根据杠杆动态调整）
+    base_trailing_stop_positive = 0.001
+    base_trailing_stop_positive_offset = 0.0139
 
     timeframe = "1h"
     can_short = True
@@ -124,7 +124,7 @@ class EnhancedLSTMStrategy(IStrategy):
     stake_multiplier = RealParameter(0.3, 1.5, default=0.8, space='buy')  # 基础资金倍数
     confidence_stake_factor = RealParameter(1.0, 3.0, default=2.0, space='buy')  # 信心度资金因子
     volatility_stake_factor = RealParameter(0.5, 2.5, default=1.5, space='buy')  # 波动率资金因子
-    max_stake_ratio = RealParameter(0.5, 1.0, default=1.0, space='buy')  # 最大资金使用比例
+    max_stake_ratio = RealParameter(0.1, 0.3, default=0.3, space='buy')  # 最大资金使用比例30%
     min_stake_ratio = RealParameter(0.01, 0.1, default=0.01, space='buy')  # 最小资金使用比例
 
     def calculate_adaptive_leverage(self, dataframe: DataFrame, current_index: int) -> float:
@@ -387,8 +387,8 @@ class EnhancedLSTMStrategy(IStrategy):
             # 结合信心度和目标强度
             stake_ratio = target_strength * confidence * self.stake_multiplier.value
             
-            # 确保在1%-100%范围内
-            stake_ratio = max(0.01, min(1.0, stake_ratio))
+            # 确保在最小和最大比例范围内
+            stake_ratio = max(self.min_stake_ratio.value, min(self.max_stake_ratio.value, stake_ratio))
             
             return stake_ratio
             
@@ -531,3 +531,31 @@ class EnhancedLSTMStrategy(IStrategy):
             ] = (1, "exit_short_lstm")
 
         return df
+
+    def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime,
+                       current_rate: float, current_profit: float, after_fill: bool,
+                       **kwargs) -> float | None:
+        """
+        杠杆感知的跟踪止损 - 根据杠杆同比例放大跟踪止损参数
+        杠杆越高, 跟踪止损距离越宽松, 避免高杠杆时被小波动止损
+        """
+        try:
+            # 获取当前交易的杠杆
+            leverage = trade.leverage or 1.0
+
+            # 根据杠杆同比例放大跟踪止损参数
+            # 杠杆越高, 止损距离越宽松
+            adjusted_trailing_positive = self.base_trailing_stop_positive * leverage
+            adjusted_trailing_offset = self.base_trailing_stop_positive_offset * leverage
+
+            # 只有当盈利超过调整后的偏移量时才启动跟踪止损
+            if current_profit > adjusted_trailing_offset:
+                return -adjusted_trailing_positive  # 返回负数
+
+            # 盈利不足, 不启动跟踪止损
+            return None
+
+        except Exception as e:
+            return -self.base_trailing_stop_positive  # 返回负数
+
+
