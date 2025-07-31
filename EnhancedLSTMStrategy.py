@@ -36,17 +36,17 @@ class EnhancedLSTMStrategy(IStrategy):
         "w7": 0.09226,
         "w8": 0.85667,
         "leverage_multiplier": 1.0,        # 基础杠杆倍数，改为1.0支持更宽范围
-        "min_leverage": 1,                 # 最小杠杆改为1倍
-        "max_leverage": 100,
+        "min_leverage": 1,                 # 最小杠杆
+        "max_leverage": 15,          # 最大杠杆
         "volatility_threshold": 0.02,
         "confidence_threshold": 0.7,
         "trend_persistence_bars": 3,
         "exit_confidence_threshold": 0.8,
         # 完全自适应资金管理参数 (1%-100%)
-        "stake_multiplier": 0.8,           # 基础资金倍数，提高到0.8
-        "confidence_stake_factor": 2.0,    # 信心度资金因子，提高到2.0
-        "volatility_stake_factor": 1.5,    # 波动率资金因子，提高到1.5
-        "max_stake_ratio": 0.3,            # 最大资金使用比例30%
+        "stake_multiplier": 0.8,           # 基础资金倍数
+        "confidence_stake_factor": 2.0,    # 信心度资金因子
+        "volatility_stake_factor": 1.5,    # 波动率资金因子
+        "max_stake_ratio": 0.4,            # 最大资金使用比例
         "min_stake_ratio": 0.01,           # 最小资金使用比例1%
     }
 
@@ -59,18 +59,18 @@ class EnhancedLSTMStrategy(IStrategy):
 
     # ROI table - 适应高杠杆和大资金使用
     minimal_roi = {
-        "600": 0
+        "2880": 0     # Hold after 48 hours
     }
 
     # Stoploss - 固定止损，不做动态调整
     stoploss = -10000  # 无止损，让模型完全决定何时退出  
 
-    # 跟踪止损 - 禁用固定跟踪止损，仅使用基于杠杆的自适应跟踪止损
-    trailing_stop = False  # 禁用固定跟踪止损
-    # trailing_stop_positive = 0.001  # 已禁用
-    # trailing_stop_positive_offset = 0.0139  # 已禁用
-    # trailing_only_offset_is_reached = False  # 已禁用
-    use_custom_stoploss = True  # 启用自定义止损（基于杠杆）
+    # 跟踪止损
+    trailing_stop = True  # 固定跟踪止损
+    trailing_stop_positive = 0.001
+    trailing_stop_positive_offset = 0.0139  # 基础跟踪止损偏移
+    trailing_only_offset_is_reached = True
+    use_custom_stoploss = False  # 自定义止损（基于杠杆）
     
     # 基础跟踪止损参数（将根据杠杆动态调整）
     base_trailing_stop_positive = 0.001
@@ -108,6 +108,15 @@ class EnhancedLSTMStrategy(IStrategy):
     
     # Risk management
     risk_reduction_factor = RealParameter(0.5, 1.0, default=0.8, space='sell')
+    
+    # Feature switches (功能开关)
+    enable_adaptive_leverage = True    # 自适应杠杆开关 (False = 使用固定杠杆)
+    enable_adaptive_stake = False       # 自适应资金管理开关 (False = 使用config中的stake_amount)
+    enable_percentage_stake = True     # 百分比资金模式开关 (True = 使用总资金的百分比)
+    
+    # Fixed parameters (when features are disabled)
+    fixed_leverage = 5.0              # 固定杠杆倍数（当enable_adaptive_leverage=False时使用）
+    percentage_stake_ratio = 0.1       # 总资金百分比 (默认10%)
 
     # Weights for calculating the aggregate score
     w0 = RealParameter(0, 1, default=0.10, space='buy')
@@ -129,29 +138,41 @@ class EnhancedLSTMStrategy(IStrategy):
 
     def calculate_adaptive_leverage(self, dataframe: DataFrame, current_index: int) -> float:
         """
-        LSTM模型完全决定杠杆 - 无风险管理限制
-        直接基于模型输出计算1-100倍杠杆
+        基于LSTM模型信心度的智能杠杆计算
+        主要基于confidence_smooth，在min_leverage到max_leverage范围内动态调整
+        综合考虑信心度(70%)和目标强度(30%)，支持四舍五入
         """
+        # 如果自适应杠杆关闭，返回固定杠杆
+        if not self.enable_adaptive_leverage:
+            return self.fixed_leverage
+            
         try:
             if current_index < 20:  # Not enough data
-                return 50  # 默认50倍
+                return self.min_leverage.value  # 默认最小杠杆
                 
-            # 直接使用LSTM模型输出
-            target_strength = abs(dataframe['&-target'].iloc[current_index])
+            # 获取信心度和目标强度
             confidence = dataframe['confidence_smooth'].iloc[current_index] if 'confidence_smooth' in dataframe.columns else 0.5
+            target_strength = abs(dataframe['&-target'].iloc[current_index])
             
-            # 简单线性映射：模型输出越强，杠杆越高
-            # target_strength 范围通常在 0-1，直接映射到 1-100
-            leverage = target_strength * 100 * self.leverage_multiplier.value
+            # 综合信心度计算：主要基于confidence(70%)，target_strength作为调节(30%)
+            combined_confidence = confidence * 0.7 + target_strength * 0.3
             
-            # 确保在1-100范围内
-            leverage = max(1, min(100, leverage))
+            # 确保combined_confidence在合理范围内(0-1)
+            combined_confidence = max(0, min(1, combined_confidence))
             
-            return int(leverage)
+            # 映射到杠杆范围：从min_leverage到max_leverage
+            leverage_range = self.max_leverage.value - self.min_leverage.value
+            leverage = self.min_leverage.value + (combined_confidence * leverage_range * self.leverage_multiplier.value)
+            
+            # 确保在范围内并四舍五入
+            leverage = max(self.min_leverage.value, min(self.max_leverage.value, leverage))
+            leverage = round(leverage)
+            
+            return leverage
             
         except Exception as e:
             logger.warning(f"Error calculating adaptive leverage: {e}")
-            return 50  # 错误时默认50倍
+            return self.min_leverage.value  # 错误时返回最小杠杆
 
     def calculate_position_size(self, dataframe: DataFrame, current_index: int, 
                               stake_amount: float, current_rate: float) -> float:
@@ -374,7 +395,12 @@ class EnhancedLSTMStrategy(IStrategy):
         """
         LSTM模型完全决定仓位 - 无风险管理限制
         直接基于模型输出计算1%-100%资金使用
+        如果enable_adaptive_stake为False，返回None表示使用固定stake
         """
+        # 如果自适应资金管理关闭，返回None
+        if not self.enable_adaptive_stake:
+            return None
+            
         try:
             if current_index < 20:
                 return 0.5  # 默认50%
@@ -402,23 +428,44 @@ class EnhancedLSTMStrategy(IStrategy):
                           **kwargs) -> float:
         """
         Fully adaptive stake amount calculation - 1% to 100%!
-        Calculates stake ratio based on market conditions just like leverage
+        支持三种模式:
+        1. 固定金额模式 (enable_adaptive_stake=False, enable_percentage_stake=False): 使用config中的stake_amount
+        2. 百分比模式 (enable_percentage_stake=True): 使用总资金的固定百分比
+        3. 自适应模式 (enable_adaptive_stake=True): 根据市场条件动态调整资金比例
         """
+        # 获取可用余额
+        available_balance = self.wallets.get_free(self.config['stake_currency'])
+        
+        # 模式1: 百分比模式 - 使用总资金的固定百分比
+        if self.enable_percentage_stake:
+            calculated_stake = available_balance * self.percentage_stake_ratio
+            
+            # 应用系统限制
+            if min_stake:
+                calculated_stake = max(calculated_stake, min_stake)
+            if max_stake:
+                calculated_stake = min(calculated_stake, max_stake)
+                
+            logger.info(f"Percentage stake for {pair}: {calculated_stake:.2f} USDT "
+                       f"({self.percentage_stake_ratio:.1%} of {available_balance:.2f} USDT)")
+            return calculated_stake
+        
+        # 模式2: 如果自适应资金管理也关闭，使用config中的固定stake
+        if not self.enable_adaptive_stake:
+            return proposed_stake
+        
+        # 模式3: 自适应模式 - 根据市场条件动态调整资金比例    
         try:
             # Get the latest dataframe
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
             
             if len(dataframe) < 20:
                 # Not enough data, use minimal stake
-                available_balance = self.wallets.get_free(self.config['stake_currency'])
                 return max(available_balance * self.min_stake_ratio.value, min_stake or 0)
             
             # Calculate adaptive stake ratio (just like adaptive leverage)
             current_index = len(dataframe) - 1
             stake_ratio = self.calculate_adaptive_stake_ratio(dataframe, current_index)
-            
-            # Get available balance
-            available_balance = self.wallets.get_free(self.config['stake_currency'])
             
             # Calculate stake amount
             calculated_stake = available_balance * stake_ratio
@@ -458,7 +505,14 @@ class EnhancedLSTMStrategy(IStrategy):
         """
         Dynamic leverage calculation based on market conditions
         支持1-100倍完整范围
+        如果enable_adaptive_leverage为False，返回固定杠杆
         """
+        # 如果自适应杠杆关闭，返回固定杠杆
+        if not self.enable_adaptive_leverage:
+            # 从config中获取固定杠杆，如果没有则使用类属性
+            fixed_lev = self.config.get('leverage', self.fixed_leverage)
+            return min(fixed_lev, max_leverage)
+            
         try:
             # Get the latest dataframe
             dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
@@ -557,5 +611,4 @@ class EnhancedLSTMStrategy(IStrategy):
 
         except Exception as e:
             return -self.base_trailing_stop_positive  # 返回负数
-
 
