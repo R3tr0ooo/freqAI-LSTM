@@ -59,7 +59,7 @@ class EnhancedLSTMStrategy(IStrategy):
 
     # ROI table - 适应高杠杆和大资金使用
     minimal_roi = {
-        "2880": 0     # Hold after 48 hours
+        "600": 0     # Hold after 48 hours
     }
 
     # Stoploss - 固定止损，不做动态调整
@@ -110,13 +110,13 @@ class EnhancedLSTMStrategy(IStrategy):
     risk_reduction_factor = RealParameter(0.5, 1.0, default=0.8, space='sell')
     
     # Feature switches (功能开关)
-    enable_adaptive_leverage = True    # 自适应杠杆开关 (False = 使用固定杠杆)
+    enable_adaptive_leverage = False    # 自适应杠杆开关 (False = 使用固定杠杆) 有问题 会把杠杆吃满
     enable_adaptive_stake = False       # 自适应资金管理开关 (False = 使用config中的stake_amount)
     enable_percentage_stake = True     # 百分比资金模式开关 (True = 使用总资金的百分比)
     
     # Fixed parameters (when features are disabled)
-    fixed_leverage = 5.0              # 固定杠杆倍数（当enable_adaptive_leverage=False时使用）
-    percentage_stake_ratio = 0.1       # 总资金百分比 (默认10%)
+    fixed_leverage = 15.0              # 固定杠杆倍数（当enable_adaptive_leverage=False时使用）
+    percentage_stake_ratio = 0.2       # 总资金百分比 
 
     # Weights for calculating the aggregate score
     w0 = RealParameter(0, 1, default=0.10, space='buy')
