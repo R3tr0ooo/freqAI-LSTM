@@ -63,12 +63,12 @@ class EnhancedLSTMStrategy(IStrategy):
     }
 
     # Stoploss - 固定止损，不做动态调整
-    stoploss = -10000  # 无止损，让模型完全决定何时退出  
+    stoploss = -0.6
 
     # 跟踪止损
     trailing_stop = True  # 固定跟踪止损
     trailing_stop_positive = 0.001
-    trailing_stop_positive_offset = 0.0139  # 基础跟踪止损偏移
+    trailing_stop_positive_offset = 0.03  # 基础跟踪止损偏移
     trailing_only_offset_is_reached = True
     use_custom_stoploss = False  # 自定义止损（基于杠杆）
     
