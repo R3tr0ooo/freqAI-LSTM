@@ -68,7 +68,7 @@ class EnhancedLSTMStrategy(IStrategy):
     # 跟踪止损
     trailing_stop = True  # 固定跟踪止损
     trailing_stop_positive = 0.001
-    trailing_stop_positive_offset = 0.03  # 基础跟踪止损偏移
+    trailing_stop_positive_offset = 0.02  # 基础跟踪止损偏移
     trailing_only_offset_is_reached = True
     use_custom_stoploss = False  # 自定义止损（基于杠杆）
     
@@ -611,4 +611,3 @@ class EnhancedLSTMStrategy(IStrategy):
 
         except Exception as e:
             return -self.base_trailing_stop_positive  # 返回负数
-
