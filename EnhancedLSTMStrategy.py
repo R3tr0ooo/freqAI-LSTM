@@ -479,17 +479,22 @@ class EnhancedLSTMStrategy(IStrategy):
             dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
             if len(dataframe) < 20:
                 return None
-                
+
             # 获取当前信号强度
             current_signal = dataframe['&-target'].iloc[-1]
-            
-            # 检查信号方向是否与持仓一致
+            previous_signal = dataframe['&-target'].iloc[-2]
+
+            # 检查信号方向是否与持仓一致, 且为新的入场信号
             should_add_position = False
-            if trade.is_short and current_signal < -self.threshold_sell.value:
-                should_add_position = True
-            elif not trade.is_short and current_signal > self.threshold_buy.value:
-                should_add_position = True
-            
+            if trade.is_short:
+                if (current_signal < -self.threshold_sell.value and
+                        previous_signal >= -self.threshold_sell.value):
+                    should_add_position = True
+            else:
+                if (current_signal > self.threshold_buy.value and
+                        previous_signal <= self.threshold_buy.value):
+                    should_add_position = True
+
             if not should_add_position:
                 return None
                 
