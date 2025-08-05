@@ -17,64 +17,74 @@ logger = logging.getLogger(__name__)
 
 class EnhancedLSTMStrategy(IStrategy):
     """
-    Enhanced LSTM Strategy with Adaptive Leverage and Improved Exit Logic
-    - Supports up to 100x leverage
-    - Adaptive leverage based on market conditions and model confidence
-    - Advanced trend persistence and exit logic
-    - Reduced sensitivity to short-term market noise
+    增强型LSTM策略 - 趋势跟踪与智能加仓
+    - 支持亏损加仓降低成本
+    - 趋势跟踪，减少小波动干扰
+    - 自适应杠杆和资金管理
+    - LSTM模型驱动的进出场决策
     """
-    # Hyperspace parameters:
+    # 超参数配置
     buy_params = {
-        "threshold_buy": 0.59453,
-        "w0": 0.54347,
-        "w1": 0.82226,
-        "w2": 0.56675,
-        "w3": 0.77918,
-        "w4": 0.98488,
-        "w5": 0.31368,
-        "w6": 0.75916,
-        "w7": 0.09226,
-        "w8": 0.85667,
-        "leverage_multiplier": 1.0,        # 基础杠杆倍数，改为1.0支持更宽范围
+        "threshold_buy": 0.59453,          # 做多信号阈值（LSTM输出>此值时做多）
+        "w0": 0.54347,                     # MA移动平均线权重
+        "w1": 0.82226,                     # MACD趋势动量权重（高权重=重视趋势）
+        "w2": 0.56675,                     # ROC变化率权重
+        "w3": 0.77918,                     # RSI相对强弱权重（高权重=重视超买超卖）
+        "w4": 0.98488,                     # 布林带宽度权重（最高权重=重视波动区间）
+        "w5": 0.31368,                     # CCI商品通道指数权重
+        "w6": 0.75916,                     # OBV成交量权重（高权重=重视量价关系）
+        "w7": 0.09226,                     # ATR波动率权重（低权重=不关注短期波动）
+        "w8": 0.85667,                     # 随机指标权重（高权重=关注超买超卖）
+        "leverage_multiplier": 1.0,        # 杠杆倍数调节器
         "min_leverage": 1,                 # 最小杠杆
-        "max_leverage": 15,          # 最大杠杆
-        "volatility_threshold": 0.02,
-        "confidence_threshold": 0.7,
-        "trend_persistence_bars": 3,
-        "exit_confidence_threshold": 0.8,
-        # 完全自适应资金管理参数 (1%-100%)
+        "max_leverage": 15,                # 最大杠杆
+        "volatility_threshold": 0.02,      # 波动率阈值
+        "confidence_threshold": 0.7,       # 信心度阈值
+        "trend_persistence_bars": 5,       # 趋势持续K线数（增加到5根，减少假信号）
+        "exit_confidence_threshold": 0.85, # 出场信心阈值（提高到0.85，持有更久）
+        # 资金管理参数
         "stake_multiplier": 0.8,           # 基础资金倍数
         "confidence_stake_factor": 2.0,    # 信心度资金因子
         "volatility_stake_factor": 1.5,    # 波动率资金因子
         "max_stake_ratio": 0.4,            # 最大资金使用比例
-        "min_stake_ratio": 0.01,           # 最小资金使用比例1%
+        "min_stake_ratio": 0.01,           # 最小资金使用比例
     }
 
     sell_params = {
-        "threshold_sell": 0.80573,
-        "risk_reduction_factor": 0.8,
-        "trend_reversal_threshold": 0.75,
-        "exit_smoothing_period": 5,
+        "threshold_sell": 0.80573,          # 做空/平多信号阈值
+        "risk_reduction_factor": 0.8,      # 风险降低因子
+        "trend_reversal_threshold": 0.85,  # 趋势反转阈值（提高到0.85，减少假反转）
+        "exit_smoothing_period": 8,        # 出场平滑周期（增加到8，更稳定）
     }
 
-    # ROI table - 适应高杠杆和大资金使用
+    # ROI表 - 为长期趋势优化（不设置短期止盈）
     minimal_roi = {
-        "600": 0     # Hold after 48 hours
+        "0": 100,      # 不设置强制止盈，让策略自主决定
+        "720": 0.5,    # 12小时后至少50%利润
+        "1440": 0.2,   # 24小时后至少20%利润
+        "2880": 0.1,   # 48小时后至少10%利润
+        "4320": 0      # 72小时后可以平仓
     }
 
-    # Stoploss - 固定止损，不做动态调整
-    stoploss = -0.6
+    # 止损设置 - 关闭止损，完全信任LSTM模型
+    stoploss = -1  # 关闭止损（-1 = 100%止损）
 
-    # 跟踪止损
-    trailing_stop = True  # 固定跟踪止损
-    trailing_stop_positive = 0.001
-    trailing_stop_positive_offset = 0.02  # 基础跟踪止损偏移
-    trailing_only_offset_is_reached = True
-    use_custom_stoploss = False  # 自定义止损（基于杠杆）
+    # 跟踪止损 - 为大趋势优化
+    trailing_stop = True                    # 启用跟踪止损
+    trailing_stop_positive = 0.005          # 盈利后跟踪止损距离（0.5%）
+    trailing_stop_positive_offset = 0.05    # 盈利5%后才启动跟踪（给趋势空间）
+    trailing_only_offset_is_reached = True  # 只有达到偏移后才跟踪
+    use_custom_stoploss = True              # 使用自定义止损逻辑
     
-    # 基础跟踪止损参数（将根据杠杆动态调整）
-    base_trailing_stop_positive = 0.001
-    base_trailing_stop_positive_offset = 0.0139
+    # 趋势跟踪参数 - 优化以捕捉大趋势
+    base_trailing_stop_positive = 0.005         # 基础跟踪止损（0.5%）
+    base_trailing_stop_positive_offset = 0.05   # 基础触发偏移（5%盈利后启动）
+    
+    # 大趋势模式参数
+    trend_trailing_multiplier = 3.0             # 趋势模式下止损放大3倍（给更多空间）
+    trend_profit_threshold = 0.10               # 盈利10%后进入趋势保护模式
+    super_trend_threshold = 0.20                # 盈利20%后进入超级趋势模式
+    consolidation_trailing_multiplier = 0.3     # 震荡市场止损收紧（快速退出）
 
     timeframe = "1h"
     can_short = True
@@ -84,10 +94,10 @@ class EnhancedLSTMStrategy(IStrategy):
 
     startup_candle_count = 100
 
-    # 无保护机制 - 完全由LSTM模型决定
+    # 保护机制 - 仅基本保护，主要由LSTM决定
     @property
     def protections(self):
-        return []  # 移除所有保护机制
+        return []  # 不使用内置保护，完全信任LSTM模型
 
     # Enhanced strategy parameters
     threshold_buy = RealParameter(-1, 1, default=0.5, space='buy')
@@ -109,14 +119,22 @@ class EnhancedLSTMStrategy(IStrategy):
     # Risk management
     risk_reduction_factor = RealParameter(0.5, 1.0, default=0.8, space='sell')
     
-    # Feature switches (功能开关)
-    enable_adaptive_leverage = False    # 自适应杠杆开关 (False = 使用固定杠杆) 有问题 会把杠杆吃满
-    enable_adaptive_stake = False       # 自适应资金管理开关 (False = 使用config中的stake_amount)
-    enable_percentage_stake = True     # 百分比资金模式开关 (True = 使用总资金的百分比)
+    # 功能开关
+    enable_adaptive_leverage = False    # 自适应杠杆（关闭，使用固定杠杆）
+    enable_adaptive_stake = False       # 自适应资金管理（关闭）
+    enable_percentage_stake = True      # 百分比资金模式（开启，使用20%资金）
+    enable_add_position = True          # 加仓功能（开启 - 亏损加仓）
+    enable_trend_following = True       # 趋势跟踪模式（开启）
     
-    # Fixed parameters (when features are disabled)
-    fixed_leverage = 15.0              # 固定杠杆倍数（当enable_adaptive_leverage=False时使用）
-    percentage_stake_ratio = 0.2       # 总资金百分比 
+    # 固定参数
+    fixed_leverage = 15.0               # 固定杠杆倍数（15倍杠杆）
+    percentage_stake_ratio = 0.20       # 每次开仓使用20%资金
+    
+    # 安全杠杆系统参数
+    safe_leverage_mode = True           # 启用安全杠杆模式
+    base_safe_leverage = 10.0           # 基础安全杠杆
+    max_safe_leverage = 15.0            # 最大安全杠杆（降低风险）
+    leverage_decay_factor = 0.9         # 杠杆衰减因子（缓慢衰减） 
 
     # Weights for calculating the aggregate score
     w0 = RealParameter(0, 1, default=0.10, space='buy')
@@ -136,11 +154,24 @@ class EnhancedLSTMStrategy(IStrategy):
     max_stake_ratio = RealParameter(0.1, 0.3, default=0.3, space='buy')  # 最大资金使用比例30%
     min_stake_ratio = RealParameter(0.01, 0.1, default=0.01, space='buy')  # 最小资金使用比例
 
+    # 智能加仓参数 - 亏损加仓降成本
+    add_position_ratio = RealParameter(0.5, 1.0, default=0.8, space='buy')      # 加仓比例80%
+    max_add_positions = IntParameter(1, 3, default=2, space='buy')              # 最大加仓2次（控制风险）
+    min_trend_confidence = RealParameter(0.4, 0.9, default=0.6, space='buy')    # 加仓最小信心度60%
+    add_position_volatility_filter = RealParameter(0.01, 0.05, default=0.03, space='buy')  # 波动率过滤
+    
+    # 加仓策略参数
+    pyramid_position_mode = True        # 金字塔式仓位管理
+    position_scale_factor = 1.2         # 每次加仓递增20%
+    loss_threshold_for_add = -0.05      # 亏损5%开始加仓
+    profit_threshold_for_add = 0.08     # 盈利8%追踪趋势加仓
+    max_loss_for_add = -0.20           # 亏损20%停止加仓
+    add_position_cooldown = 120        # 加仓冷却时间2小时
+
     def calculate_adaptive_leverage(self, dataframe: DataFrame, current_index: int) -> float:
         """
-        基于LSTM模型信心度的智能杠杆计算
-        主要基于confidence_smooth，在min_leverage到max_leverage范围内动态调整
-        综合考虑信心度(70%)和目标强度(30%)，支持四舍五入
+        智能杠杆计算 - 基于LSTM模型信心度
+        综合考虑信心度(70%)和目标强度(30%)
         """
         # 如果自适应杠杆关闭，返回固定杠杆
         if not self.enable_adaptive_leverage:
@@ -151,10 +182,11 @@ class EnhancedLSTMStrategy(IStrategy):
                 return self.min_leverage.value  # 默认最小杠杆
                 
             # 获取信心度和目标强度
-            confidence = dataframe['confidence_smooth'].iloc[current_index] if 'confidence_smooth' in dataframe.columns else 0.5
+            confidence = dataframe['confidence_smooth'].iloc[current_index] \
+                if 'confidence_smooth' in dataframe.columns else 0.5
             target_strength = abs(dataframe['&-target'].iloc[current_index])
             
-            # 综合信心度计算：主要基于confidence(70%)，target_strength作为调节(30%)
+            # 综合信心度计算: 70%信心度 + 30%信号强度
             combined_confidence = confidence * 0.7 + target_strength * 0.3
             
             # 确保combined_confidence在合理范围内(0-1)
@@ -422,16 +454,80 @@ class EnhancedLSTMStrategy(IStrategy):
             logger.warning(f"Error calculating adaptive stake ratio: {e}")
             return 0.5  # 错误时默认50%
             
+    def adjust_trade_position(self, trade: Trade, current_time: datetime,
+                             current_rate: float, current_profit: float,
+                             min_stake: float | None, max_stake: float,
+                             current_entry_rate: float, current_exit_rate: float,
+                             entry_tag: str | None, exit_tag: str | None,
+                             **kwargs) -> float | None:
+        """
+        简化加仓逻辑：只要亏损+LSTM同方向信号=加仓，最多2次
+        """
+        if not self.enable_add_position:
+            return None
+            
+        try:
+            # 检查加仓次数限制
+            if trade.nr_of_successful_entries >= self.max_add_positions.value:
+                return None
+                
+            # 只有亏损时才加仓
+            if current_profit >= 0:
+                return None
+                
+            # 获取最新数据
+            dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
+            if len(dataframe) < 20:
+                return None
+                
+            # 获取当前信号强度
+            current_signal = dataframe['&-target'].iloc[-1]
+            
+            # 检查信号方向是否与持仓一致
+            should_add_position = False
+            if trade.is_short and current_signal < -self.threshold_sell.value:
+                should_add_position = True
+            elif not trade.is_short and current_signal > self.threshold_buy.value:
+                should_add_position = True
+            
+            if not should_add_position:
+                return None
+                
+            # 计算加仓金额
+            available_balance = self.wallets.get_free(self.config['stake_currency'])
+            
+            # 金字塔式加仓: 每次递增
+            position_count = trade.nr_of_successful_entries
+            scale_factor = self.position_scale_factor ** position_count
+            
+            # 基础加仓金额
+            base_add_amount = trade.stake_amount * self.add_position_ratio.value
+            add_stake = base_add_amount * scale_factor
+            
+            # 限制单次加仓不超过可用余额的30%
+            add_stake = min(add_stake, available_balance * 0.3)
+            
+            # 确保满足最小金额要求
+            if min_stake and add_stake < min_stake:
+                return None
+                
+            logger.info(f"加仓信号 {trade.pair}: 亏损加仓 {current_profit:.2%}, "
+                       f"信号强度: {current_signal:.3f}, "
+                       f"加仓次数: {position_count + 1}/{self.max_add_positions.value}, "
+                       f"加仓金额: {add_stake:.2f} USDT")
+            
+            return add_stake
+            
+        except Exception as e:
+            logger.warning(f"加仓计算错误: {e}")
+            return None
+
     def custom_stake_amount(self, pair: str, current_time, current_rate: float,
-                          proposed_stake: float, min_stake: Optional[float], max_stake: float,
-                          leverage: float, entry_tag: Optional[str], side: str,
+                          proposed_stake: float, min_stake: float | None, max_stake: float,
+                          leverage: float, entry_tag: str | None, side: str,
                           **kwargs) -> float:
         """
-        Fully adaptive stake amount calculation - 1% to 100%!
-        支持三种模式:
-        1. 固定金额模式 (enable_adaptive_stake=False, enable_percentage_stake=False): 使用config中的stake_amount
-        2. 百分比模式 (enable_percentage_stake=True): 使用总资金的固定百分比
-        3. 自适应模式 (enable_adaptive_stake=True): 根据市场条件动态调整资金比例
+        计算初始仓位大小 - 为加仓预留空间
         """
         # 获取可用余额
         available_balance = self.wallets.get_free(self.config['stake_currency'])
@@ -536,25 +632,66 @@ class EnhancedLSTMStrategy(IStrategy):
             return min(self.min_leverage.value, max_leverage)
 
     def populate_entry_trend(self, df: DataFrame, metadata: dict) -> DataFrame:
-        # Enhanced entry conditions with stronger confirmation
+        """
+        生成入场信号 - 支持初始进场和亏损加仓
+        """
+        # 基础做多条件
         enter_long_conditions = [
             df["do_predict"] == 1,
             df['&-target'] > self.threshold_buy.value,
             df['volume'] > 0,
         ]
 
+        # 基础做空条件
         enter_short_conditions = [
             df["do_predict"] == 1,
-            df['&-target'] < self.threshold_sell.value,
+            df['&-target'] < -self.threshold_sell.value,  # 注意负值
             df["volume"] > 0,
         ]
 
+        # 趋势强度条件 - 用于大趋势确认
+        if len(df) > self.trend_persistence_bars.value:
+            # 计算趋势持续性得分
+            df['trend_score'] = (
+                df['&-target'].rolling(self.trend_persistence_bars.value).mean().abs()
+            )
+            
+            # 强趋势条件: 趋势得分高且信心度高
+            # 安全获取confidence_smooth列，如果不存在使用默认值
+            confidence_smooth = df.get('confidence_smooth', pd.Series(0.5, index=df.index))
+            
+            strong_trend_long = [
+                df['trend_score'] > 0.3,  # 强趋势阈值
+                confidence_smooth > self.confidence_threshold.value,
+                df['&-target'] > self.threshold_buy.value * 1.2,  # 更强的信号
+            ]
+            
+            strong_trend_short = [
+                df['trend_score'] > 0.3,
+                confidence_smooth > self.confidence_threshold.value,
+                df['&-target'] < -self.threshold_sell.value * 1.2,
+            ]
+            
+            # 对于强趋势，使用特殊标签（便于后续处理）
+            df.loc[
+                reduce(lambda x, y: x & y, strong_trend_long), 
+                ["enter_long", "enter_tag"]
+            ] = (1, "long_strong_trend")
+            
+            df.loc[
+                reduce(lambda x, y: x & y, strong_trend_short), 
+                ["enter_short", "enter_tag"]
+            ] = (1, "short_strong_trend")
+        
+        # 标准入场信号
         df.loc[
-            reduce(lambda x, y: x & y, enter_long_conditions), ["enter_long", "enter_tag"]
+            reduce(lambda x, y: x & y, enter_long_conditions), 
+            ["enter_long", "enter_tag"]
         ] = (1, "long_adaptive")
 
         df.loc[
-            reduce(lambda x, y: x & y, enter_short_conditions), ["enter_short", "enter_tag"]
+            reduce(lambda x, y: x & y, enter_short_conditions), 
+            ["enter_short", "enter_tag"]
         ] = (1, "short_adaptive")
 
         return df
@@ -590,24 +727,55 @@ class EnhancedLSTMStrategy(IStrategy):
                        current_rate: float, current_profit: float, after_fill: bool,
                        **kwargs) -> float | None:
         """
-        杠杆感知的跟踪止损 - 根据杠杆同比例放大跟踪止损参数
-        杠杆越高, 跟踪止损距离越宽松, 避免高杠杆时被小波动止损
+        智能止损系统 - 为大趋势优化
+        - 初期给予更多空间
+        - 盈利后逐步收紧
+        - 大盈利时保护利润
         """
         try:
-            # 获取当前交易的杠杆
-            leverage = trade.leverage or 1.0
-
-            # 根据杠杆同比例放大跟踪止损参数
-            # 杠杆越高, 止损距离越宽松
-            adjusted_trailing_positive = self.base_trailing_stop_positive * leverage
-            adjusted_trailing_offset = self.base_trailing_stop_positive_offset * leverage
-
-            # 只有当盈利超过调整后的偏移量时才启动跟踪止损
-            if current_profit > adjusted_trailing_offset:
-                return -adjusted_trailing_positive  # 返回负数
-
-            # 盈利不足, 不启动跟踪止损
+            # 获取持仓时间（小时）
+            trade_duration = (current_time - trade.open_date_utc).total_seconds() / 3600
+            
+            # 阶段1: 初始阶段 - 关闭止损
+            if trade_duration < 2:  # 前2小时
+                return -1  # 关闭止损
+            
+            # 阶段2: 小幅盈利 - 保护成本
+            if current_profit > 0.02 and current_profit < self.trend_profit_threshold:
+                # 盈利2%-10%之间，使用动态止损
+                return -0.05  # 5%回撤止损
+            
+            # 阶段3: 趋势盈利 - 宽松跟踪
+            if current_profit >= self.trend_profit_threshold and current_profit < self.super_trend_threshold:
+                # 盈利10%-20%，给趋势空间
+                trailing_distance = 0.08  # 允许8%回撤
+                return -(trailing_distance * self.trend_trailing_multiplier)
+            
+            # 阶段4: 超级趋势 - 保护利润
+            if current_profit >= self.super_trend_threshold:
+                # 盈利超过20%，收紧止损保护利润
+                # 动态计算：利润越高，止损越紧
+                base_trailing = 0.05
+                profit_factor = min(current_profit / 0.5, 1.0)  # 最多到50%利润
+                trailing_distance = base_trailing * (1 - profit_factor * 0.5)  # 利润越高越紧
+                return -max(trailing_distance, 0.02)  # 最紧不低于2%
+            
+            # 默认止损
             return None
-
+            
         except Exception as e:
-            return -self.base_trailing_stop_positive  # 返回负数
+            logger.warning(f"止损计算错误: {e}")
+            return -1  # 错误时关闭止损
+
+    def get_position_info(self, pair: str) -> dict:
+        """
+        获取当前持仓信息（模拟实现）
+        在实际应用中，这需要通过Freqtrade API获取真实持仓信息
+        """
+        # 这是一个模拟方法，实际应用中需要通过API获取真实持仓信息
+        return {
+            'is_position_open': False,
+            'position_size': 0,
+            'entry_price': 0,
+            'current_profit': 0
+        }
