@@ -24,7 +24,7 @@
             "refresh_period": 1800
         }
     ],
-"trading_mode": "futures",
+"trading_mode": "margin",
 	"stake_currency": "USDT",
     "stake_amount": "unlimited",
     "tradable_balance_ratio": 0.99,
