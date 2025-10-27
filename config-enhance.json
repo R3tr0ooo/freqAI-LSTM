@@ -2,23 +2,16 @@
 "exchange": {
         "name": "okx",
         "key": "",
-        "secret": "Quakwood233!",
+        "secret": "",
         "ccxt_config": {},
         "ccxt_async_config": {},
         "pair_whitelist": [
 			"BTC/USDT",
-			"BCH/USDT",
+			
 			"ETH/USDT",
-			"LINK/USDT",
-			"LTC/USDT",
+			
 			"SOL/USDT",
-			"BNB/USDT",
-			"XRP/USDT",
-			"ADA/USDT",
-			"DOT/USDT",
-			"ETC/USDT",
-			"ALGO/USDT",
-			"LUNA/USDT"
+			
         ],
         "pair_blacklist": [
         ]
@@ -34,8 +27,8 @@
         "jwt_secret_key": "b7961731b5150bd0bc8274c7816c7a774d00951580bb799aff3445ea5fa1c2d2",
         "ws_token": "NyFZxEEutdq3x0kXO_jesd38i37gL2lhGw",
         "CORS_origins": [],
-        "username": "freqtrader",
-        "password": "1456"
+        "username": "freqai",
+        "password": "0"
     },
 
     "freqai": {
