@@ -32,7 +32,7 @@
     "fiat_display_currency": "USD",
 
 	"exchange": {
-        "name": "binance",
+        "name": "okx",
         "key": "",
         "secret": "",
         "ccxt_config": {},
