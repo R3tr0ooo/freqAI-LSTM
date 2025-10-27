@@ -14,7 +14,7 @@
         "use_order_book": true,
         "order_book_top": 1
     },
-
+	"max_open_trades": 3,
 	"pairlists": [
         {
             "method": "StaticPairList",
