@@ -38,13 +38,10 @@
         "ccxt_config": {},
         "ccxt_async_config": {},
         "pair_whitelist": [
-			"BTC/USDT",
-			
-			"ETH/USDT",
-			
-			"SOL/USDT",
-			
-        ],
+			"BTC/USDT:USDT",
+			"ETH/USDT:USDT",
+			"SOL/USDT:USDT",
+			],
         "pair_blacklist": [
         ]
     },
