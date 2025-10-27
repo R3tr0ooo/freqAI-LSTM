@@ -50,7 +50,7 @@
  "api_server": {
         "enabled": true,
         "listen_ip_address": "0.0.0.0",
-        "listen_port": 8080,
+        "listen_port": 8081,
         "verbosity": "error",
         "enable_openapi": false,
         "jwt_secret_key": "b7961731b5150bd0bc8274c7816c7a774d00951580bb799aff3445ea5fa1c2d2",
