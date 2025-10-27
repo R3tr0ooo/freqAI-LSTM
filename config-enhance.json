@@ -62,7 +62,8 @@
         "num_lstm_layers": 4,
         "hidden_dim": 256,
         "dropout_percent": 0.35,
-        "window_size": 15
+        "window_size": 15,
       },
-    }
+    },
+}
 }
